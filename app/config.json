@@ -1,0 +1,22 @@
+{
+  "serial": {
+    "port": "COM3",
+    "baudrate": 9600,
+    "bytesize": 8,
+    "parity": "N",
+    "stopbits": 1,
+    "timeout_seconds": 1.2
+  },
+  "meter": {
+    "read_command": "READ?",
+    "line_terminator": "\\r\\n"
+  },
+  "polling": {
+    "interval_seconds": 2.0
+  },
+  "api": {
+    "host": "127.0.0.1",
+    "port": 8787
+  },
+  "mock_mode": true
+}
