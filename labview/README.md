@@ -12,6 +12,8 @@ Use a Producer/Consumer architecture:
 4. Enqueue measurement cluster
 5. Consumer loop logs data, updates UI, and handles alarms
 
+For calibration, add a separate settings panel and a button that calls `POST /calibration/start` with the selected point count and standard values.
+
 ## Core LabVIEW Blocks
 
 - HTTP Client Open Handle.vi
@@ -34,12 +36,28 @@ Create a typedef cluster named `pH_Measurement.ctl`:
 - valid (Boolean)
 - error_message (string)
 
+Create a second typedef cluster named `Calibration_Settings.ctl`:
+
+- point_count (I32)
+- standards (array of DBL, length 2 or 3)
+- enter_command (string)
+- point_command_template (string)
+- settle_seconds (DBL)
+
 ## Polling Logic
 
 1. Call `GET http://127.0.0.1:8787/measurement`
 2. If `status == "ok"`, set `valid = TRUE`
 3. If service unavailable or parse fails, set `valid = FALSE`
 4. Always enqueue data to keep the consumer loop deterministic
+
+## Calibration Flow
+
+1. User selects 2-point or 3-point calibration in settings.
+2. User enters the exact buffer values before starting.
+3. LabVIEW sends the calibration request to the bridge.
+4. Bridge sends the configured command sequence to the meter.
+5. LabVIEW polls `/calibration/status` until the run is `completed` or `failed`.
 
 ## Logging Suggestions
 
