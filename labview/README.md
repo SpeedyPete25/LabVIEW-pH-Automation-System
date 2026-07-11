@@ -1,6 +1,8 @@
 # LabVIEW Integration Guide
 
-This guide shows how to create a LabVIEW VI that reads pH values from the local bridge API.
+This guide is now optional reference material. The primary operator application in this repository is the desktop GUI in [app/orionstar_gui.py](app/orionstar_gui.py).
+
+If you still need a LabVIEW implementation, use the notes below as a starting point for a native front panel design rather than a web client.
 
 ## Recommended VI Design
 

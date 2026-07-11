@@ -37,7 +37,8 @@ class OrionStarMeter:
         line_terminator: str,
     ):
         self._read_command = read_command
-        self._line_terminator = line_terminator.encode("ascii", errors="ignore")
+        self._line_terminator = line_terminator
+        self._io_lock = threading.Lock()
         self._serial = serial.Serial(
             port=port,
             baudrate=baudrate,
@@ -47,21 +48,32 @@ class OrionStarMeter:
             timeout=timeout_seconds,
         )
 
+    def send_command(self, command: str, line_terminator: Optional[str] = None, expect_response: bool = True) -> str:
+        terminator = self._line_terminator if line_terminator is None else line_terminator
+        payload = command.encode("ascii", errors="ignore") + terminator.encode("ascii", errors="ignore")
+        with self._io_lock:
+            self._serial.write(payload)
+            self._serial.flush()
+            if expect_response:
+                return self._serial.readline().decode("ascii", errors="ignore").strip()
+        return ""
+
     def write_command(self, command: str, line_terminator: str) -> None:
         payload = command.encode("ascii", errors="ignore") + line_terminator.encode("ascii", errors="ignore")
-        self._serial.write(payload)
-        self._serial.flush()
+        with self._io_lock:
+            self._serial.write(payload)
+            self._serial.flush()
 
     def read_response(self) -> str:
-        return self._serial.readline().decode("ascii", errors="ignore").strip()
+        with self._io_lock:
+            return self._serial.readline().decode("ascii", errors="ignore").strip()
 
     def close(self) -> None:
         if self._serial and self._serial.is_open:
             self._serial.close()
 
     def query_measurement(self) -> Measurement:
-        self.write_command(self._read_command, self._line_terminator.decode("ascii", errors="ignore"))
-        raw = self.read_response()
+        raw = self.send_command(self._read_command, expect_response=True)
         now = datetime.now(timezone.utc).isoformat()
 
         ph, temperature_c, mv = parse_orionstar_line(raw)
@@ -76,6 +88,10 @@ class OrionStarMeter:
 
 
 class MockMeter:
+    def send_command(self, command: str, line_terminator: Optional[str] = None, expect_response: bool = True) -> str:
+        _ = command, line_terminator
+        return "OK" if expect_response else ""
+
     def write_command(self, command: str, line_terminator: str) -> None:
         _ = command, line_terminator
 
@@ -146,6 +162,9 @@ def build_calibration_request(config: dict, payload: Optional[dict] = None) -> C
     payload = payload or {}
 
     point_count = int(payload.get("point_count", calibration_cfg["point_count"]))
+    if point_count not in (2, 3):
+        raise ValueError("Calibration point_count must be 2 or 3")
+
     standards = payload.get("standards", calibration_cfg["standards"])
     if len(standards) != point_count:
         raise ValueError(f"Expected {point_count} calibration standards, got {len(standards)}")
@@ -177,14 +196,12 @@ def run_calibration(meter, request: CalibrationRequest, state: CalibrationState,
     state.set_run(run)
 
     try:
-        meter.write_command(request.enter_command, line_terminator)
+        meter.send_command(request.enter_command, line_terminator=line_terminator, expect_response=False)
 
         for index, standard_value in enumerate(request.standards, start=1):
             command = request.point_command_template.format(point=index, value=standard_value)
-            meter.write_command(command, line_terminator)
             time.sleep(request.settle_seconds)
-
-            raw_response = meter.read_response()
+            raw_response = meter.send_command(command, line_terminator=line_terminator, expect_response=True)
             acknowledged = bool(raw_response)
             run.steps.append(
                 asdict(
@@ -199,7 +216,7 @@ def run_calibration(meter, request: CalibrationRequest, state: CalibrationState,
             )
 
         if request.exit_command:
-            meter.write_command(request.exit_command, line_terminator)
+            meter.send_command(request.exit_command, line_terminator=line_terminator, expect_response=False)
 
         run.status = "completed"
         run.message = "Calibration sequence completed"
@@ -399,6 +416,24 @@ def load_config(path: Path):
         return json.load(f)
 
 
+def open_meter_from_config(config: dict):
+    if config.get("mock_mode", False):
+        return MockMeter()
+
+    serial_cfg = config["serial"]
+    meter_cfg = config["meter"]
+    return OrionStarMeter(
+        port=serial_cfg["port"],
+        baudrate=serial_cfg["baudrate"],
+        bytesize=serial_cfg["bytesize"],
+        parity=serial_cfg["parity"],
+        stopbits=serial_cfg["stopbits"],
+        timeout_seconds=serial_cfg["timeout_seconds"],
+        read_command=meter_cfg["read_command"],
+        line_terminator=meter_cfg["line_terminator"],
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Orion Star pH serial bridge for LabVIEW")
     parser.add_argument("--config", default="app/config.json", help="Path to bridge config JSON")
@@ -412,22 +447,7 @@ def main():
 
     state = BridgeState()
     calibration_state = CalibrationState()
-
-    if config.get("mock_mode", False):
-        meter = MockMeter()
-    else:
-        serial_cfg = config["serial"]
-        meter_cfg = config["meter"]
-        meter = OrionStarMeter(
-            port=serial_cfg["port"],
-            baudrate=serial_cfg["baudrate"],
-            bytesize=serial_cfg["bytesize"],
-            parity=serial_cfg["parity"],
-            stopbits=serial_cfg["stopbits"],
-            timeout_seconds=serial_cfg["timeout_seconds"],
-            read_command=meter_cfg["read_command"],
-            line_terminator=meter_cfg["line_terminator"],
-        )
+    meter = open_meter_from_config(config)
 
     poller = PollerThread(meter=meter, state=state, interval_seconds=config["polling"]["interval_seconds"])
     poller.start()

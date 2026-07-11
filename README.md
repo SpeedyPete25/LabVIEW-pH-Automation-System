@@ -1,20 +1,21 @@
 # LabVIEW pH Automation System (Orion Star)
 
-This repository contains a starter architecture for automating pH measurement from an Orion Star meter and consuming the measurements in LabVIEW.
+This repository contains a desktop GUI application for automating pH measurement and calibration with an Orion Star meter.
 
 ## What You Get
 
-- A Python serial bridge service: [app/orionstar_bridge.py](app/orionstar_bridge.py)
+- A desktop GUI application: [app/orionstar_gui.py](app/orionstar_gui.py)
+- Shared meter and calibration logic: [app/orionstar_bridge.py](app/orionstar_bridge.py)
 - Config template for serial/API parameters: [app/config.example.json](app/config.example.json)
-- LabVIEW integration workflow: [labview/README.md](labview/README.md)
+- Optional LabVIEW design notes: [labview/README.md](labview/README.md)
 - Protocol notes and commissioning checklist: [docs/orionstar_protocol_notes.md](docs/orionstar_protocol_notes.md)
 
 ## Architecture
 
 1. Orion Star meter communicates over serial (USB virtual COM or RS-232).
-2. Python bridge polls the meter and exposes latest reading over local HTTP.
-3. LabVIEW VI calls `GET /measurement` and logs/visualizes data.
-4. LabVIEW VI can start a calibration run with `POST /calibration/start` using point settings from config or request body.
+2. The desktop GUI reads measurements directly from the meter.
+3. The operator selects 2-point or 3-point calibration in the GUI settings.
+4. The operator enters the buffer values and starts calibration from the GUI.
 
 ## Quick Start
 
@@ -45,45 +46,38 @@ Then edit `app/config.json`:
 ### 3) Run bridge
 
 ```powershell
-python app\orionstar_bridge.py --config app\config.json
+python app\orionstar_gui.py --config app\config.json
 ```
 
-### 4) Test API
+### 4) Build and run the Windows executable
 
-Open in browser or LabVIEW HTTP client:
-
-- `http://127.0.0.1:8787/health`
-- `http://127.0.0.1:8787/measurement`
-- `http://127.0.0.1:8787/calibration/status`
-
-Start calibration with an HTTP `POST` to `http://127.0.0.1:8787/calibration/start` and a JSON body like:
-
-```json
-{
-  "point_count": 3,
-  "standards": [4.0, 7.0, 10.0]
-}
+```powershell
+./build_exe.ps1
+./dist/OrionStarPH/OrionStarPH.exe
 ```
 
-## Measurement Response Format
+The build copies [app/config.json](app/config.json) into the packaged app folder so you can edit the config next to the executable.
 
-```json
-{
-  "status": "ok",
-  "measurement": {
-    "timestamp_utc": "2026-07-09T12:34:56.123456+00:00",
-    "ph": 7.012,
-    "temperature_c": 24.9,
-    "mv": -0.71,
-    "raw": "pH=7.012,T=24.9C,mV=-0.71",
-    "source": "meter"
-  },
-  "last_error": null
-}
-```
+### 5) Use the GUI
+
+- Click `Read Now` to query a measurement immediately.
+- Click `Start Polling` to poll continuously using the configured interval.
+- Select `2` or `3` in `Point Count`.
+- Enter the calibration buffer values in the enabled `Buffer` fields.
+- Click `Start Calibration` to run the configured meter calibration sequence.
+
+The right side of the window contains the calibration controls. Only the selected number of buffer fields stays enabled.
+
+## GUI Behavior
+
+- The measurement panel shows pH, temperature, mV, timestamp, raw response, and the last error.
+- The calibration panel lets the user choose 2-point or 3-point calibration and enter the exact standard values before starting.
+- The event log records connection issues, read failures, and calibration completion state.
+- `mock_mode` still works, so the GUI can be tested without hardware attached.
 
 ## Notes
 
-- Start with `"mock_mode": true` in `app/config.json` to validate LabVIEW integration before wiring the real meter.
+- Start with `"mock_mode": true` in `app/config.json` to validate the GUI workflow before wiring the real meter.
 - If parsing is not correct for your exact meter output string, adjust `parse_orionstar_line()` in [app/orionstar_bridge.py](app/orionstar_bridge.py).
 - The calibration commands in config are placeholders. Replace them with the exact Orion Star calibration sequence for your meter model before running against hardware.
+- The HTTP bridge code remains in [app/orionstar_bridge.py](app/orionstar_bridge.py) as shared logic, but the primary application is now the desktop GUI.
