@@ -62,6 +62,7 @@ The build copies [app/config.json](app/config.json) into the packaged app folder
 
 - Click `Read Now` to query a measurement immediately.
 - Click `Start Polling` to poll continuously using the configured interval.
+- Open the `Settings` tab to set `Dark Mode` and `Read Duration (seconds)`.
 - Select `2` or `3` in `Point Count`.
 - Enter the calibration buffer values in the enabled `Buffer` fields.
 - Click `Start Calibration` to run the configured meter calibration sequence.
@@ -72,6 +73,7 @@ The right side of the window contains the calibration controls. Only the selecte
 
 - The measurement panel shows pH, temperature, mV, timestamp, raw response, and the last error.
 - The calibration panel lets the user choose 2-point or 3-point calibration and enter the exact standard values before starting.
+- The settings tab includes Dark Mode and Read Duration (polling interval), with Apply and Save controls.
 - The event log records connection issues, read failures, and calibration completion state.
 - `mock_mode` still works, so the GUI can be tested without hardware attached.
 

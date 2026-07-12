@@ -1,4 +1,5 @@
 import argparse
+import json
 import queue
 import sys
 import threading
@@ -51,6 +52,7 @@ class OrionStarGUI(tk.Tk):
         self._measurement_inflight = False
         self._polling_enabled = False
         self._poll_job = None
+        self._theme_initialized = False
 
         self.connection_var = tk.StringVar(value="Disconnected")
         self.mode_var = tk.StringVar(value="mock" if self._config.get("mock_mode") else "live")
@@ -64,12 +66,15 @@ class OrionStarGUI(tk.Tk):
         self.calibration_status_var = tk.StringVar(value="idle")
         self.point_count_var = tk.IntVar(value=int(self._config["calibration"]["point_count"]))
         self.standard_vars = [tk.StringVar(), tk.StringVar(), tk.StringVar()]
+        self.dark_mode_var = tk.BooleanVar(value=bool(self._config.get("ui", {}).get("dark_mode", False)))
+        self.read_duration_var = tk.StringVar(value=str(self._config["polling"].get("interval_seconds", 2.0)))
 
         for index, value in enumerate(self._config["calibration"].get("standards", [])):
             if index < len(self.standard_vars):
                 self.standard_vars[index].set(str(value))
 
         self._build_ui()
+        self._apply_theme()
         self._connect_meter()
         self._sync_standard_inputs()
         self.after(100, self._drain_events)
@@ -78,20 +83,29 @@ class OrionStarGUI(tk.Tk):
     def _build_ui(self) -> None:
         root = ttk.Frame(self, padding=16)
         root.pack(fill="both", expand=True)
-        root.columnconfigure(0, weight=3)
-        root.columnconfigure(1, weight=2)
+        root.rowconfigure(1, weight=1)
         root.rowconfigure(2, weight=1)
 
         header = ttk.Frame(root)
-        header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
         header.columnconfigure(0, weight=1)
         ttk.Label(header, text="Orion Star pH Measurement and Calibration", font=("Segoe UI", 16, "bold")).grid(
             row=0, column=0, sticky="w"
         )
         ttk.Label(header, textvariable=self.connection_var).grid(row=0, column=1, sticky="e")
 
-        measurement_frame = ttk.LabelFrame(root, text="Measurement")
-        measurement_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 12))
+        notebook = ttk.Notebook(root)
+        notebook.grid(row=1, column=0, sticky="nsew")
+
+        measurement_tab = ttk.Frame(notebook, padding=12)
+        calibration_tab = ttk.Frame(notebook, padding=12)
+        settings_tab = ttk.Frame(notebook, padding=12)
+        notebook.add(measurement_tab, text="Measurement")
+        notebook.add(calibration_tab, text="Calibration")
+        notebook.add(settings_tab, text="Settings")
+
+        measurement_frame = ttk.LabelFrame(measurement_tab, text="Measurement")
+        measurement_frame.pack(fill="both", expand=True)
         measurement_frame.columnconfigure(1, weight=1)
 
         measurement_rows = [
@@ -116,8 +130,8 @@ class OrionStarGUI(tk.Tk):
         ttk.Button(controls_frame, text="Start Polling", command=self._start_polling).grid(row=0, column=1, sticky="ew", padx=4)
         ttk.Button(controls_frame, text="Stop Polling", command=self._stop_polling).grid(row=0, column=2, sticky="ew", padx=(8, 0))
 
-        calibration_frame = ttk.LabelFrame(root, text="Calibration")
-        calibration_frame.grid(row=1, column=1, sticky="nsew")
+        calibration_frame = ttk.LabelFrame(calibration_tab, text="Calibration")
+        calibration_frame.pack(fill="both", expand=True)
         calibration_frame.columnconfigure(1, weight=1)
 
         ttk.Label(calibration_frame, text="Mode").grid(row=0, column=0, sticky="w", padx=10, pady=6)
@@ -141,8 +155,25 @@ class OrionStarGUI(tk.Tk):
             row=6, column=0, columnspan=2, sticky="ew", padx=10, pady=(10, 12)
         )
 
+        settings_frame = ttk.LabelFrame(settings_tab, text="Application Settings")
+        settings_frame.pack(fill="both", expand=True)
+        settings_frame.columnconfigure(1, weight=1)
+
+        ttk.Checkbutton(settings_frame, text="Dark Mode", variable=self.dark_mode_var).grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 6)
+        )
+        ttk.Label(settings_frame, text="Read Duration (seconds)").grid(row=1, column=0, sticky="w", padx=10, pady=6)
+        ttk.Entry(settings_frame, textvariable=self.read_duration_var, width=16).grid(row=1, column=1, sticky="w", padx=10, pady=6)
+
+        settings_buttons = ttk.Frame(settings_frame)
+        settings_buttons.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(12, 10))
+        settings_buttons.columnconfigure(0, weight=1)
+        settings_buttons.columnconfigure(1, weight=1)
+        ttk.Button(settings_buttons, text="Apply", command=self._apply_settings).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        ttk.Button(settings_buttons, text="Save", command=self._save_settings).grid(row=0, column=1, sticky="ew", padx=(8, 0))
+
         log_frame = ttk.LabelFrame(root, text="Event Log")
-        log_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(12, 0))
+        log_frame.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_widget = tk.Text(log_frame, height=12, wrap="word", state="disabled")
@@ -150,6 +181,68 @@ class OrionStarGUI(tk.Tk):
         scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_widget.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.log_widget.configure(yscrollcommand=scrollbar.set)
+
+    def _apply_theme(self) -> None:
+        style = ttk.Style()
+        if not self._theme_initialized:
+            style.theme_use("clam")
+            self._theme_initialized = True
+
+        if self.dark_mode_var.get():
+            bg = "#1e1e1e"
+            panel = "#2a2a2a"
+            fg = "#f2f2f2"
+            text_bg = "#232323"
+            text_fg = "#e8e8e8"
+        else:
+            bg = "#f0f0f0"
+            panel = "#ffffff"
+            fg = "#111111"
+            text_bg = "#ffffff"
+            text_fg = "#111111"
+
+        self.configure(bg=bg)
+        style.configure("TFrame", background=bg)
+        style.configure("TLabel", background=bg, foreground=fg)
+        style.configure("TLabelframe", background=bg, foreground=fg)
+        style.configure("TLabelframe.Label", background=bg, foreground=fg)
+        style.configure("TButton", background=panel, foreground=fg)
+        style.configure("TCheckbutton", background=bg, foreground=fg)
+        style.configure("TEntry", fieldbackground=panel, foreground=fg)
+        style.configure("TCombobox", fieldbackground=panel, foreground=fg)
+        style.configure("TNotebook", background=bg)
+        style.configure("TNotebook.Tab", background=panel, foreground=fg)
+        self.log_widget.configure(background=text_bg, foreground=text_fg, insertbackground=text_fg)
+
+    def _parse_read_duration(self) -> float:
+        value = float(self.read_duration_var.get())
+        if value <= 0:
+            raise ValueError("Read duration must be greater than 0")
+        return value
+
+    def _apply_settings(self) -> None:
+        try:
+            duration = self._parse_read_duration()
+        except ValueError as exc:
+            messagebox.showerror("Invalid Read Duration", str(exc))
+            return
+
+        self._config.setdefault("ui", {})["dark_mode"] = bool(self.dark_mode_var.get())
+        self._config.setdefault("polling", {})["interval_seconds"] = duration
+        self._apply_theme()
+        self._append_log(f"Settings applied: dark_mode={self.dark_mode_var.get()}, read_duration={duration}s")
+
+    def _save_settings(self) -> None:
+        self._apply_settings()
+        self._config.setdefault("ui", {})["dark_mode"] = bool(self.dark_mode_var.get())
+
+        try:
+            with self._config_path.open("w", encoding="utf-8") as config_file:
+                json.dump(self._config, config_file, indent=2)
+                config_file.write("\n")
+            self._append_log(f"Settings saved to {self._config_path}")
+        except OSError as exc:
+            messagebox.showerror("Save Failed", f"Could not save settings: {exc}")
 
     def _connect_meter(self) -> None:
         try:
@@ -206,7 +299,11 @@ class OrionStarGUI(tk.Tk):
     def _schedule_poll(self) -> None:
         if not self._polling_enabled:
             return
-        interval_ms = max(250, int(float(self._config["polling"]["interval_seconds"]) * 1000))
+        try:
+            interval_seconds = self._parse_read_duration()
+        except ValueError:
+            interval_seconds = float(self._config["polling"].get("interval_seconds", 2.0))
+        interval_ms = max(250, int(interval_seconds * 1000))
         self._poll_job = self.after(interval_ms, self._poll_once)
 
     def _poll_once(self) -> None:
