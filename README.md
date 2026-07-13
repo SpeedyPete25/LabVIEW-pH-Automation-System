@@ -65,7 +65,9 @@ The build copies [app/config.json](app/config.json) into the packaged app folder
 - Open the `Settings` tab to set `Dark Mode` and `Read Duration (seconds)`.
 - Select `2` or `3` in `Point Count`.
 - Enter the calibration buffer values in the enabled `Buffer` fields.
-- Click `Start Calibration` to run the configured meter calibration sequence.
+- Click `Start Calibration` to begin guided calibration.
+- At each step, place the probe in the prompted buffer and click `Continue Step`.
+- Use `Cancel Calibration` to safely abort a run.
 
 The right side of the window contains the calibration controls. Only the selected number of buffer fields stays enabled.
 
@@ -73,6 +75,7 @@ The right side of the window contains the calibration controls. Only the selecte
 
 - The measurement panel shows pH, temperature, mV, timestamp, raw response, and the last error.
 - The calibration panel lets the user choose 2-point or 3-point calibration and enter the exact standard values before starting.
+- Calibration is step-guided, requires operator confirmation per buffer, and times out if confirmation is not received.
 - The settings tab includes Dark Mode and Read Duration (polling interval), with Apply and Save controls.
 - The event log records connection issues, read failures, and calibration completion state.
 - `mock_mode` still works, so the GUI can be tested without hardware attached.
@@ -82,4 +85,5 @@ The right side of the window contains the calibration controls. Only the selecte
 - Start with `"mock_mode": true` in `app/config.json` to validate the GUI workflow before wiring the real meter.
 - If parsing is not correct for your exact meter output string, adjust `parse_orionstar_line()` in [app/orionstar_bridge.py](app/orionstar_bridge.py).
 - The calibration commands in config are placeholders. Replace them with the exact Orion Star calibration sequence for your meter model before running against hardware.
+- `calibration.step_timeout_seconds` controls how long the app waits for each operator step before failing the run.
 - The HTTP bridge code remains in [app/orionstar_bridge.py](app/orionstar_bridge.py) as shared logic, but the primary application is now the desktop GUI.

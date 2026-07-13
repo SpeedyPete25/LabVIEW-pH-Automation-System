@@ -5,16 +5,17 @@ import sys
 import threading
 import tkinter as tk
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import messagebox, ttk
 
 from app.orionstar_bridge import (
     CalibrationRun,
+    CalibrationStepResult,
     CalibrationState,
     build_calibration_request,
     load_config,
     open_meter_from_config,
-    run_calibration,
 )
 
 
@@ -53,6 +54,13 @@ class OrionStarGUI(tk.Tk):
         self._polling_enabled = False
         self._poll_job = None
         self._theme_initialized = False
+        self._calibration_active = False
+        self._calibration_cancel_event = threading.Event()
+        self._calibration_waiting_for_continue = False
+        self._calibration_continue_deadline = None
+        self._calibration_step_timeout_job = None
+        self._calibration_request = None
+        self._calibration_step_index = 0
 
         self.connection_var = tk.StringVar(value="Disconnected")
         self.mode_var = tk.StringVar(value="mock" if self._config.get("mock_mode") else "live")
@@ -64,6 +72,7 @@ class OrionStarGUI(tk.Tk):
         self.timestamp_var = tk.StringVar(value="--")
         self.raw_var = tk.StringVar(value="--")
         self.calibration_status_var = tk.StringVar(value="idle")
+        self.calibration_prompt_var = tk.StringVar(value="Ready")
         self.point_count_var = tk.IntVar(value=int(self._config["calibration"]["point_count"]))
         self.standard_vars = [tk.StringVar(), tk.StringVar(), tk.StringVar()]
         self.dark_mode_var = tk.BooleanVar(value=bool(self._config.get("ui", {}).get("dark_mode", False)))
@@ -150,10 +159,33 @@ class OrionStarGUI(tk.Tk):
 
         ttk.Label(calibration_frame, text="Calibration Status").grid(row=5, column=0, sticky="w", padx=10, pady=6)
         ttk.Label(calibration_frame, textvariable=self.calibration_status_var).grid(row=5, column=1, sticky="w", padx=10, pady=6)
+        ttk.Label(calibration_frame, text="Current Step").grid(row=6, column=0, sticky="w", padx=10, pady=6)
+        ttk.Label(calibration_frame, textvariable=self.calibration_prompt_var).grid(row=6, column=1, sticky="w", padx=10, pady=6)
 
-        ttk.Button(calibration_frame, text="Start Calibration", command=self._start_calibration).grid(
-            row=6, column=0, columnspan=2, sticky="ew", padx=10, pady=(10, 12)
+        calibration_buttons = ttk.Frame(calibration_frame)
+        calibration_buttons.grid(row=7, column=0, columnspan=2, sticky="ew", padx=10, pady=(10, 12))
+        calibration_buttons.columnconfigure(0, weight=1)
+        calibration_buttons.columnconfigure(1, weight=1)
+        calibration_buttons.columnconfigure(2, weight=1)
+
+        self.start_calibration_button = ttk.Button(calibration_buttons, text="Start Calibration", command=self._start_calibration)
+        self.start_calibration_button.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+
+        self.continue_calibration_button = ttk.Button(
+            calibration_buttons,
+            text="Continue Step",
+            command=self._continue_calibration_step,
+            state="disabled",
         )
+        self.continue_calibration_button.grid(row=0, column=1, sticky="ew", padx=4)
+
+        self.cancel_calibration_button = ttk.Button(
+            calibration_buttons,
+            text="Cancel Calibration",
+            command=self._cancel_calibration,
+            state="disabled",
+        )
+        self.cancel_calibration_button.grid(row=0, column=2, sticky="ew", padx=(8, 0))
 
         settings_frame = ttk.LabelFrame(settings_tab, text="Application Settings")
         settings_frame.pack(fill="both", expand=True)
@@ -317,9 +349,25 @@ class OrionStarGUI(tk.Tk):
             self._poll_job = None
         self._append_log("Auto polling stopped")
 
+    def _set_calibration_controls(self, active: bool, waiting_for_continue: bool = False) -> None:
+        self.start_calibration_button.configure(state="disabled" if active else "normal")
+        self.continue_calibration_button.configure(state="normal" if waiting_for_continue else "disabled")
+        self.cancel_calibration_button.configure(state="normal" if active else "disabled")
+
+    def _get_calibration_step_timeout_seconds(self) -> float:
+        return float(self._config.get("calibration", {}).get("step_timeout_seconds", 180.0))
+
     def _start_calibration(self) -> None:
         if self._meter is None:
             messagebox.showerror("Meter Not Connected", "The meter is not connected. Check config and serial settings.")
+            return
+
+        if self._polling_enabled:
+            messagebox.showerror("Stop Polling First", "Stop auto polling before starting calibration.")
+            return
+
+        if self._calibration_active:
+            messagebox.showinfo("Calibration In Progress", "A calibration run is already active.")
             return
 
         try:
@@ -333,8 +381,16 @@ class OrionStarGUI(tk.Tk):
             messagebox.showerror("Invalid Calibration Settings", str(exc))
             return
 
+        self._calibration_request = request
+        self._calibration_step_index = 0
+        self._calibration_active = True
+        self._calibration_waiting_for_continue = False
+        self._calibration_continue_deadline = None
+        self._calibration_cancel_event.clear()
+        self._set_calibration_controls(active=True, waiting_for_continue=False)
+
         queued_run = CalibrationRun(
-            started_utc="queued",
+            started_utc=datetime.now(timezone.utc).isoformat(),
             status="queued",
             message="Calibration queued from GUI",
             request={
@@ -349,26 +405,175 @@ class OrionStarGUI(tk.Tk):
         )
         self._calibration_state.set_run(queued_run)
         self.calibration_status_var.set("queued")
+        self.calibration_prompt_var.set("Entering calibration mode...")
         self._append_log(f"Calibration started with {request.point_count} points: {request.standards}")
 
         thread = threading.Thread(
-            target=self._calibration_worker,
+            target=self._calibration_enter_worker,
             args=(request,),
             daemon=True,
         )
         thread.start()
 
-    def _calibration_worker(self, request) -> None:
+    def _calibration_enter_worker(self, request) -> None:
         try:
-            run_calibration(
-                self._meter,
-                request,
-                self._calibration_state,
-                self._config["meter"]["line_terminator"],
+            self._meter.send_command(
+                request.enter_command,
+                line_terminator=self._config["meter"]["line_terminator"],
+                expect_response=False,
             )
-            self._events.put(("calibration_update", None))
+            self._events.put(("calibration_entered", None))
         except Exception as exc:
             self._events.put(("calibration_error", str(exc)))
+
+    def _prompt_next_calibration_step(self) -> None:
+        request = self._calibration_request
+        if request is None:
+            return
+
+        if self._calibration_step_index >= len(request.standards):
+            self._finish_calibration(success=True, message="Calibration sequence completed")
+            return
+
+        step_number = self._calibration_step_index + 1
+        standard = request.standards[self._calibration_step_index]
+        timeout_seconds = self._get_calibration_step_timeout_seconds()
+
+        self._calibration_waiting_for_continue = True
+        self._calibration_continue_deadline = datetime.now(timezone.utc).timestamp() + timeout_seconds
+        self.calibration_status_var.set("waiting_for_operator")
+        self.calibration_prompt_var.set(
+            f"Step {step_number}/{len(request.standards)}: place probe in pH {standard:.2f}, then click Continue"
+        )
+        self._append_log(
+            f"Awaiting operator for step {step_number}: buffer pH {standard:.2f}. Timeout in {int(timeout_seconds)}s."
+        )
+        self._set_calibration_controls(active=True, waiting_for_continue=True)
+        self._schedule_calibration_timeout_check()
+
+    def _continue_calibration_step(self) -> None:
+        if not self._calibration_active or not self._calibration_waiting_for_continue:
+            return
+
+        request = self._calibration_request
+        if request is None:
+            return
+
+        self._calibration_waiting_for_continue = False
+        self._calibration_continue_deadline = None
+        self._set_calibration_controls(active=True, waiting_for_continue=False)
+
+        step_number = self._calibration_step_index + 1
+        standard = request.standards[self._calibration_step_index]
+        self.calibration_status_var.set("running_step")
+        self.calibration_prompt_var.set(f"Running step {step_number} for pH {standard:.2f}...")
+
+        worker = threading.Thread(
+            target=self._run_calibration_step_worker,
+            args=(step_number, standard, request),
+            daemon=True,
+        )
+        worker.start()
+
+    def _run_calibration_step_worker(self, step_number: int, standard: float, request) -> None:
+        try:
+            settle_seconds = max(0.0, request.settle_seconds)
+            elapsed = 0.0
+            while elapsed < settle_seconds:
+                if self._calibration_cancel_event.is_set():
+                    self._events.put(("calibration_canceled", "Calibration canceled by operator"))
+                    return
+                sleep_slice = min(0.2, settle_seconds - elapsed)
+                threading.Event().wait(sleep_slice)
+                elapsed += sleep_slice
+
+            if self._calibration_cancel_event.is_set():
+                self._events.put(("calibration_canceled", "Calibration canceled by operator"))
+                return
+
+            command = request.point_command_template.format(point=step_number, value=standard)
+            raw_response = self._meter.send_command(
+                command,
+                line_terminator=self._config["meter"]["line_terminator"],
+                expect_response=True,
+            )
+
+            self._events.put(
+                (
+                    "calibration_step_done",
+                    {
+                        "point_index": step_number,
+                        "standard_value": standard,
+                        "command": command,
+                        "raw_response": raw_response,
+                    },
+                )
+            )
+        except Exception as exc:
+            self._events.put(("calibration_error", str(exc)))
+
+    def _schedule_calibration_timeout_check(self) -> None:
+        if self._calibration_step_timeout_job is not None:
+            self.after_cancel(self._calibration_step_timeout_job)
+        self._calibration_step_timeout_job = self.after(500, self._check_calibration_timeout)
+
+    def _check_calibration_timeout(self) -> None:
+        self._calibration_step_timeout_job = None
+        if not self._calibration_active or not self._calibration_waiting_for_continue:
+            return
+
+        if self._calibration_continue_deadline is not None:
+            now_ts = datetime.now(timezone.utc).timestamp()
+            if now_ts >= self._calibration_continue_deadline:
+                self._finish_calibration(success=False, message="Timed out waiting for operator confirmation")
+                return
+
+        self._schedule_calibration_timeout_check()
+
+    def _cancel_calibration(self) -> None:
+        if not self._calibration_active:
+            return
+
+        self._calibration_cancel_event.set()
+        if self._calibration_waiting_for_continue:
+            self._finish_calibration(success=False, message="Calibration canceled by operator")
+        else:
+            self.calibration_status_var.set("canceling")
+            self.calibration_prompt_var.set("Cancel requested. Waiting for active step to stop...")
+
+    def _finish_calibration(self, success: bool, message: str) -> None:
+        snapshot = self._calibration_state.snapshot()
+        snapshot.status = "completed" if success else "failed"
+        snapshot.message = message
+        snapshot.finished_utc = datetime.now(timezone.utc).isoformat()
+
+        request = self._calibration_request
+        if success and request and request.exit_command:
+            try:
+                self._meter.send_command(
+                    request.exit_command,
+                    line_terminator=self._config["meter"]["line_terminator"],
+                    expect_response=False,
+                )
+            except Exception as exc:
+                snapshot.status = "failed"
+                snapshot.message = f"Calibration complete but exit command failed: {exc}"
+
+        self._calibration_state.set_run(snapshot)
+        self.calibration_status_var.set(snapshot.status)
+        self.calibration_prompt_var.set(message)
+        self._append_log(f"Calibration {snapshot.status}: {snapshot.message}")
+
+        self._calibration_active = False
+        self._calibration_waiting_for_continue = False
+        self._calibration_continue_deadline = None
+        self._calibration_request = None
+        self._calibration_step_index = 0
+        self._set_calibration_controls(active=False, waiting_for_continue=False)
+
+        if self._calibration_step_timeout_job is not None:
+            self.after_cancel(self._calibration_step_timeout_job)
+            self._calibration_step_timeout_job = None
 
     def _drain_events(self) -> None:
         while True:
@@ -391,19 +596,47 @@ class OrionStarGUI(tk.Tk):
                 self._append_log(f"Measurement error: {payload}")
             elif event_type == "measurement_done":
                 self._measurement_inflight = False
-            elif event_type == "calibration_update":
+            elif event_type == "calibration_entered":
                 snapshot = self._calibration_state.snapshot()
-                self.calibration_status_var.set(snapshot.status)
-                self._append_log(f"Calibration {snapshot.status}: {snapshot.message}")
+                snapshot.status = "running"
+                snapshot.message = "Calibration mode entered"
+                self._calibration_state.set_run(snapshot)
+                self._prompt_next_calibration_step()
+            elif event_type == "calibration_step_done":
+                if self._calibration_cancel_event.is_set():
+                    self._finish_calibration(success=False, message="Calibration canceled by operator")
+                    continue
+
+                snapshot = self._calibration_state.snapshot()
+                step_result = CalibrationStepResult(
+                    point_index=payload["point_index"],
+                    standard_value=payload["standard_value"],
+                    command=payload["command"],
+                    acknowledged=bool(payload.get("raw_response")),
+                    raw_response=payload.get("raw_response") or None,
+                )
+                snapshot.steps = snapshot.steps or []
+                snapshot.steps.append(asdict(step_result))
+                self._calibration_state.set_run(snapshot)
+                self._append_log(
+                    f"Step {step_result.point_index} done, response: {step_result.raw_response or 'NO RESPONSE'}"
+                )
+                self._calibration_step_index += 1
+                self._prompt_next_calibration_step()
+            elif event_type == "calibration_canceled":
+                self._finish_calibration(success=False, message=str(payload))
             elif event_type == "calibration_error":
-                self.calibration_status_var.set("failed")
-                self._append_log(f"Calibration error: {payload}")
+                self._finish_calibration(success=False, message=f"Calibration error: {payload}")
 
         snapshot = self._calibration_state.snapshot()
         self.calibration_status_var.set(snapshot.status)
         self.after(100, self._drain_events)
 
     def _on_close(self) -> None:
+        self._calibration_cancel_event.set()
+        if self._calibration_step_timeout_job is not None:
+            self.after_cancel(self._calibration_step_timeout_job)
+            self._calibration_step_timeout_job = None
         self._stop_polling()
         if self._meter is not None and hasattr(self._meter, "close"):
             self._meter.close()

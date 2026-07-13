@@ -17,6 +17,7 @@
     "enter_command": "CAL,START",
     "point_command_template": "CAL,POINT={point},VALUE={value}",
     "settle_seconds": 3.0,
+    "step_timeout_seconds": 180.0,
     "exit_command": "CAL,END"
   },
   "polling": {
