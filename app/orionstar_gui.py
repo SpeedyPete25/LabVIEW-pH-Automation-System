@@ -76,7 +76,9 @@ class OrionStarGUI(tk.Tk):
         self.point_count_var = tk.IntVar(value=int(self._config["calibration"]["point_count"]))
         self.standard_vars = [tk.StringVar(), tk.StringVar(), tk.StringVar()]
         self.dark_mode_var = tk.BooleanVar(value=bool(self._config.get("ui", {}).get("dark_mode", False)))
-        self.read_duration_var = tk.StringVar(value=str(self._config["polling"].get("interval_seconds", 2.0)))
+        interval_seconds = float(self._config["polling"].get("interval_seconds", 2.0))
+        interval_minutes = interval_seconds / 60.0
+        self.read_duration_var = tk.StringVar(value=str(interval_minutes))
 
         for index, value in enumerate(self._config["calibration"].get("standards", [])):
             if index < len(self.standard_vars):
@@ -194,7 +196,7 @@ class OrionStarGUI(tk.Tk):
         ttk.Checkbutton(settings_frame, text="Dark Mode", variable=self.dark_mode_var).grid(
             row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 6)
         )
-        ttk.Label(settings_frame, text="Read Duration (seconds)").grid(row=1, column=0, sticky="w", padx=10, pady=6)
+        ttk.Label(settings_frame, text="Read Duration (minutes)").grid(row=1, column=0, sticky="w", padx=10, pady=6)
         ttk.Entry(settings_frame, textvariable=self.read_duration_var, width=16).grid(row=1, column=1, sticky="w", padx=10, pady=6)
 
         settings_buttons = ttk.Frame(settings_frame)
@@ -247,23 +249,25 @@ class OrionStarGUI(tk.Tk):
         self.log_widget.configure(background=text_bg, foreground=text_fg, insertbackground=text_fg)
 
     def _validate_read_duration(self) -> tuple[bool, str]:
-        """Validate read duration with strict bounds. Returns (is_valid, error_message)."""
+        """Validate read duration in minutes with strict bounds. Returns (is_valid, error_message)."""
         try:
             value = float(self.read_duration_var.get())
         except ValueError:
             return False, "Read duration must be a valid number"
 
-        min_duration = 0.25
-        max_duration = 60.0
+        min_duration = 0.1  # minutes
+        max_duration = 60.0  # minutes
         if value < min_duration or value > max_duration:
-            return False, f"Read duration must be between {min_duration}s and {max_duration}s"
+            return False, f"Read duration must be between {min_duration} and {max_duration} minutes"
         return True, ""
 
     def _parse_read_duration(self) -> float:
+        """Parse read duration from minutes to seconds. Validates before returning."""
         is_valid, error_msg = self._validate_read_duration()
         if not is_valid:
             raise ValueError(error_msg)
-        return float(self.read_duration_var.get())
+        minutes = float(self.read_duration_var.get())
+        return minutes * 60.0  # Convert to seconds
 
     def _apply_settings(self) -> bool:
         """Apply settings after validation. Returns True if successful, False otherwise."""
@@ -273,15 +277,16 @@ class OrionStarGUI(tk.Tk):
             return False
 
         try:
-            duration = float(self.read_duration_var.get())
+            duration_minutes = float(self.read_duration_var.get())
+            duration_seconds = duration_minutes * 60.0
         except ValueError as exc:
             messagebox.showerror("Invalid Read Duration", str(exc))
             return False
 
         self._config.setdefault("ui", {})["dark_mode"] = bool(self.dark_mode_var.get())
-        self._config.setdefault("polling", {})["interval_seconds"] = duration
+        self._config.setdefault("polling", {})["interval_seconds"] = duration_seconds
         self._apply_theme()
-        self._append_log(f"Settings applied: dark_mode={self.dark_mode_var.get()}, read_duration={duration}s")
+        self._append_log(f"Settings applied: dark_mode={self.dark_mode_var.get()}, read_duration={duration_minutes}min")
         return True
 
     def _save_settings(self) -> None:
@@ -361,7 +366,8 @@ class OrionStarGUI(tk.Tk):
         try:
             is_valid, _ = self._validate_read_duration()
             if is_valid:
-                interval_seconds = float(self.read_duration_var.get())
+                interval_minutes = float(self.read_duration_var.get())
+                interval_seconds = interval_minutes * 60.0
             else:
                 interval_seconds = float(self._config["polling"].get("interval_seconds", 2.0))
         except (ValueError, KeyError):

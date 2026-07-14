@@ -77,7 +77,7 @@ The right side of the window contains the calibration controls. Only the selecte
 - The calibration panel lets the user choose 2-point or 3-point calibration and enter the exact standard values before starting.
 - Calibration is step-guided, requires operator confirmation per buffer, and times out if confirmation is not received.
 - The settings tab includes Dark Mode and Read Duration (polling interval), with Apply and Save controls.
-  - Read Duration must be between 0.25 and 60 seconds. Validation happens before any save to disk.
+  - Read Duration is specified in minutes and must be between 0.1 and 60 minutes. Validation happens before any save to disk.
   - Apply changes theme immediately; Save persists settings to disk only if all validation passes.
 - The event log records connection issues, read failures, and calibration completion state.
 - `mock_mode` still works, so the GUI can be tested without hardware attached.
