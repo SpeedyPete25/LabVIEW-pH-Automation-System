@@ -246,35 +246,62 @@ class OrionStarGUI(tk.Tk):
         style.configure("TNotebook.Tab", background=panel, foreground=fg)
         self.log_widget.configure(background=text_bg, foreground=text_fg, insertbackground=text_fg)
 
-    def _parse_read_duration(self) -> float:
-        value = float(self.read_duration_var.get())
-        if value <= 0:
-            raise ValueError("Read duration must be greater than 0")
-        return value
-
-    def _apply_settings(self) -> None:
+    def _validate_read_duration(self) -> tuple[bool, str]:
+        """Validate read duration with strict bounds. Returns (is_valid, error_message)."""
         try:
-            duration = self._parse_read_duration()
+            value = float(self.read_duration_var.get())
+        except ValueError:
+            return False, "Read duration must be a valid number"
+
+        min_duration = 0.25
+        max_duration = 60.0
+        if value < min_duration or value > max_duration:
+            return False, f"Read duration must be between {min_duration}s and {max_duration}s"
+        return True, ""
+
+    def _parse_read_duration(self) -> float:
+        is_valid, error_msg = self._validate_read_duration()
+        if not is_valid:
+            raise ValueError(error_msg)
+        return float(self.read_duration_var.get())
+
+    def _apply_settings(self) -> bool:
+        """Apply settings after validation. Returns True if successful, False otherwise."""
+        is_valid, error_msg = self._validate_read_duration()
+        if not is_valid:
+            messagebox.showerror("Invalid Read Duration", error_msg)
+            return False
+
+        try:
+            duration = float(self.read_duration_var.get())
         except ValueError as exc:
             messagebox.showerror("Invalid Read Duration", str(exc))
-            return
+            return False
 
         self._config.setdefault("ui", {})["dark_mode"] = bool(self.dark_mode_var.get())
         self._config.setdefault("polling", {})["interval_seconds"] = duration
         self._apply_theme()
         self._append_log(f"Settings applied: dark_mode={self.dark_mode_var.get()}, read_duration={duration}s")
+        return True
 
     def _save_settings(self) -> None:
-        self._apply_settings()
-        self._config.setdefault("ui", {})["dark_mode"] = bool(self.dark_mode_var.get())
+        """Save settings to disk. Validates strictly before writing."""
+        is_valid, error_msg = self._validate_read_duration()
+        if not is_valid:
+            messagebox.showerror("Cannot Save: Invalid Settings", error_msg)
+            return
+
+        if not self._apply_settings():
+            return
 
         try:
             with self._config_path.open("w", encoding="utf-8") as config_file:
                 json.dump(self._config, config_file, indent=2)
                 config_file.write("\n")
             self._append_log(f"Settings saved to {self._config_path}")
+            messagebox.showinfo("Settings Saved", "Settings have been saved successfully.")
         except OSError as exc:
-            messagebox.showerror("Save Failed", f"Could not save settings: {exc}")
+            messagebox.showerror("Save Failed", f"Could not write to config file: {exc}")
 
     def _connect_meter(self) -> None:
         try:
@@ -332,9 +359,13 @@ class OrionStarGUI(tk.Tk):
         if not self._polling_enabled:
             return
         try:
-            interval_seconds = self._parse_read_duration()
-        except ValueError:
-            interval_seconds = float(self._config["polling"].get("interval_seconds", 2.0))
+            is_valid, _ = self._validate_read_duration()
+            if is_valid:
+                interval_seconds = float(self.read_duration_var.get())
+            else:
+                interval_seconds = float(self._config["polling"].get("interval_seconds", 2.0))
+        except (ValueError, KeyError):
+            interval_seconds = 2.0
         interval_ms = max(250, int(interval_seconds * 1000))
         self._poll_job = self.after(interval_ms, self._poll_once)
 
