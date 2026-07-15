@@ -7,6 +7,7 @@ import tkinter as tk
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
+from serial.tools import list_ports
 from tkinter import messagebox, ttk
 
 from app.orionstar_bridge import (
@@ -76,6 +77,7 @@ class OrionStarGUI(tk.Tk):
         self.point_count_var = tk.IntVar(value=int(self._config["calibration"]["point_count"]))
         self.standard_vars = [tk.StringVar(), tk.StringVar(), tk.StringVar()]
         self.dark_mode_var = tk.BooleanVar(value=bool(self._config.get("ui", {}).get("dark_mode", False)))
+        self.serial_port_var = tk.StringVar(value=str(self._config.get("serial", {}).get("port", "")))
         interval_seconds = float(self._config["polling"].get("interval_seconds", 2.0))
         interval_minutes = interval_seconds / 60.0
         self.read_duration_var = tk.StringVar(value=str(interval_minutes))
@@ -86,6 +88,7 @@ class OrionStarGUI(tk.Tk):
 
         self._build_ui()
         self._apply_theme()
+        self._refresh_com_ports(log_result=False)
         self._connect_meter()
         self._sync_standard_inputs()
         self.after(100, self._drain_events)
@@ -196,11 +199,24 @@ class OrionStarGUI(tk.Tk):
         ttk.Checkbutton(settings_frame, text="Dark Mode", variable=self.dark_mode_var).grid(
             row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 6)
         )
-        ttk.Label(settings_frame, text="Read Duration (minutes)").grid(row=1, column=0, sticky="w", padx=10, pady=6)
-        ttk.Entry(settings_frame, textvariable=self.read_duration_var, width=16).grid(row=1, column=1, sticky="w", padx=10, pady=6)
+
+        ttk.Label(settings_frame, text="COM Port").grid(row=1, column=0, sticky="w", padx=10, pady=6)
+        port_controls = ttk.Frame(settings_frame)
+        port_controls.grid(row=1, column=1, sticky="ew", padx=10, pady=6)
+        port_controls.columnconfigure(0, weight=1)
+        self.com_port_combo = ttk.Combobox(port_controls, textvariable=self.serial_port_var, width=18)
+        self.com_port_combo.grid(row=0, column=0, sticky="ew")
+        ttk.Button(port_controls, text="Scan Ports", command=self._scan_com_ports).grid(row=0, column=1, sticky="ew", padx=(8, 0))
+
+        ttk.Label(settings_frame, text="Read Duration (minutes)").grid(row=2, column=0, sticky="w", padx=10, pady=6)
+        ttk.Entry(settings_frame, textvariable=self.read_duration_var, width=16).grid(row=2, column=1, sticky="w", padx=10, pady=6)
+
+        ttk.Button(settings_frame, text="Reconnect Meter", command=self._reconnect_meter).grid(
+            row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=(6, 0)
+        )
 
         settings_buttons = ttk.Frame(settings_frame)
-        settings_buttons.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(12, 10))
+        settings_buttons.grid(row=4, column=0, columnspan=2, sticky="ew", padx=10, pady=(12, 10))
         settings_buttons.columnconfigure(0, weight=1)
         settings_buttons.columnconfigure(1, weight=1)
         ttk.Button(settings_buttons, text="Apply", command=self._apply_settings).grid(row=0, column=0, sticky="ew", padx=(0, 8))
@@ -261,6 +277,53 @@ class OrionStarGUI(tk.Tk):
             return False, f"Read duration must be between {min_duration} and {max_duration} minutes"
         return True, ""
 
+    def _validate_serial_port(self) -> tuple[bool, str]:
+        if self._config.get("mock_mode", False):
+            return True, ""
+
+        if not self.serial_port_var.get().strip():
+            return False, "COM port is required when mock mode is disabled"
+        return True, ""
+
+    def _refresh_com_ports(self, log_result: bool) -> list[str]:
+        detected_ports = sorted(port.device for port in list_ports.comports())
+        preferred_ports = [self.serial_port_var.get().strip(), str(self._config.get("serial", {}).get("port", "")).strip()]
+
+        values = []
+        for port_name in [*preferred_ports, *detected_ports]:
+            if port_name and port_name not in values:
+                values.append(port_name)
+
+        self.com_port_combo.configure(values=values)
+        if not self.serial_port_var.get().strip() and values:
+            self.serial_port_var.set(values[0])
+
+        if log_result:
+            if detected_ports:
+                self._append_log(f"Detected COM ports: {', '.join(detected_ports)}")
+            else:
+                self._append_log("No COM ports detected")
+
+        return detected_ports
+
+    def _scan_com_ports(self) -> None:
+        try:
+            self._refresh_com_ports(log_result=True)
+        except Exception as exc:
+            messagebox.showerror("COM Port Scan Failed", str(exc))
+
+    def _disconnect_meter(self) -> None:
+        if self._meter is None:
+            return
+
+        meter = self._meter
+        self._meter = None
+        if hasattr(meter, "close"):
+            try:
+                meter.close()
+            except Exception:
+                pass
+
     def _parse_read_duration(self) -> float:
         """Parse read duration from minutes to seconds. Validates before returning."""
         is_valid, error_msg = self._validate_read_duration()
@@ -276,6 +339,11 @@ class OrionStarGUI(tk.Tk):
             messagebox.showerror("Invalid Read Duration", error_msg)
             return False
 
+        is_valid, error_msg = self._validate_serial_port()
+        if not is_valid:
+            messagebox.showerror("Invalid COM Port", error_msg)
+            return False
+
         try:
             duration_minutes = float(self.read_duration_var.get())
             duration_seconds = duration_minutes * 60.0
@@ -285,13 +353,23 @@ class OrionStarGUI(tk.Tk):
 
         self._config.setdefault("ui", {})["dark_mode"] = bool(self.dark_mode_var.get())
         self._config.setdefault("polling", {})["interval_seconds"] = duration_seconds
+        selected_port = self.serial_port_var.get().strip()
+        if selected_port:
+            self._config.setdefault("serial", {})["port"] = selected_port
         self._apply_theme()
-        self._append_log(f"Settings applied: dark_mode={self.dark_mode_var.get()}, read_duration={duration_minutes}min")
+        self._append_log(
+            f"Settings applied: dark_mode={self.dark_mode_var.get()}, read_duration={duration_minutes}min, port={self._config.get('serial', {}).get('port', '')}"
+        )
         return True
 
     def _save_settings(self) -> None:
         """Save settings to disk. Validates strictly before writing."""
         is_valid, error_msg = self._validate_read_duration()
+        if not is_valid:
+            messagebox.showerror("Cannot Save: Invalid Settings", error_msg)
+            return
+
+        is_valid, error_msg = self._validate_serial_port()
         if not is_valid:
             messagebox.showerror("Cannot Save: Invalid Settings", error_msg)
             return
@@ -311,13 +389,43 @@ class OrionStarGUI(tk.Tk):
     def _connect_meter(self) -> None:
         try:
             self._meter = open_meter_from_config(self._config)
-            self.connection_var.set(f"Connected ({self.mode_var.get()})")
+            self.last_error_var.set("")
+            if self._config.get("mock_mode", False):
+                self.connection_var.set("Connected (mock)")
+            else:
+                port_name = self._config.get("serial", {}).get("port", "?")
+                self.connection_var.set(f"Connected (live: {port_name})")
             self._append_log(f"Loaded config from {self._config_path}")
         except Exception as exc:
             self._meter = None
             self.connection_var.set("Connection failed")
             self.last_error_var.set(str(exc))
             self._append_log(f"Meter connection failed: {exc}")
+
+    def _reconnect_meter(self) -> None:
+        if self._calibration_active:
+            messagebox.showerror("Calibration In Progress", "Cancel or complete calibration before reconnecting the meter.")
+            return
+
+        if self._measurement_inflight:
+            messagebox.showerror("Measurement In Progress", "Wait for the active measurement to finish before reconnecting.")
+            return
+
+        is_valid, error_msg = self._validate_serial_port()
+        if not is_valid:
+            messagebox.showerror("Invalid COM Port", error_msg)
+            return
+
+        if self._polling_enabled:
+            self._stop_polling()
+
+        selected_port = self.serial_port_var.get().strip()
+        if selected_port:
+            self._config.setdefault("serial", {})["port"] = selected_port
+
+        self._disconnect_meter()
+        self.connection_var.set("Reconnecting...")
+        self._connect_meter()
 
     def _sync_standard_inputs(self) -> None:
         point_count = self.point_count_var.get()
@@ -675,8 +783,7 @@ class OrionStarGUI(tk.Tk):
             self.after_cancel(self._calibration_step_timeout_job)
             self._calibration_step_timeout_job = None
         self._stop_polling()
-        if self._meter is not None and hasattr(self._meter, "close"):
-            self._meter.close()
+        self._disconnect_meter()
         self.destroy()
 
 

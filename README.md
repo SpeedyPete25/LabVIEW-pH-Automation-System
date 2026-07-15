@@ -76,7 +76,8 @@ The right side of the window contains the calibration controls. Only the selecte
 - The measurement panel shows pH, temperature, mV, timestamp, raw response, and the last error.
 - The calibration panel lets the user choose 2-point or 3-point calibration and enter the exact standard values before starting.
 - Calibration is step-guided, requires operator confirmation per buffer, and times out if confirmation is not received.
-- The settings tab includes Dark Mode and Read Duration (polling interval), with Apply and Save controls.
+- The settings tab includes COM port scan/reconnect controls, Dark Mode, and Read Duration (polling interval), with Apply and Save controls.
+  - Scan Ports refreshes the detected Windows COM devices, and Reconnect Meter reopens the connection using the selected port.
   - Read Duration is specified in minutes and must be between 0.1 and 60 minutes. Validation happens before any save to disk.
   - Apply changes theme immediately; Save persists settings to disk only if all validation passes.
 - The event log records connection issues, read failures, and calibration completion state.
